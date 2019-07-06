@@ -129,7 +129,7 @@ fn include_callback(requested_source_path_raw: &str, directive_type: IncludeType
     })
 }
 
-pub fn compile(path: Option<String>, code: &str, ty: ShaderKind, include_directories: &[String]) -> Result<CompilationArtifact, String> {
+pub fn compile(path: Option<String>, code: &str, ty: ShaderKind, include_directories: &[String], macro_defines: &[(&str, &str)]) -> Result<CompilationArtifact, String> {
     let mut compiler = Compiler::new().ok_or("failed to create GLSL compiler")?;
     let mut compile_options = CompileOptions::new()
         .ok_or("failed to initialize compile option")?;
@@ -139,6 +139,10 @@ pub fn compile(path: Option<String>, code: &str, ty: ShaderKind, include_directo
         // An arbitrary placeholder file name for embedded shaders
         "shader.glsl"
     };
+
+    for (name, value) in macro_defines {
+        compile_options.add_macro_definition(name, Some(value));
+    }
 
     // Specify file resolution callback for the `#include` directive
     compile_options.set_include_callback(|requested_source_path, directive_type,
@@ -392,7 +396,7 @@ mod tests {
             MyStruct s;
         };
         void main() {}
-        ", ShaderKind::Vertex, &[]).unwrap();
+        ", ShaderKind::Vertex, &[], &[]).unwrap();
         let doc = parse::parse_spirv(comp.as_binary()).unwrap();
         let res = std::panic::catch_unwind(|| structs::write_structs(&doc));
         assert!(res.is_err());
@@ -408,7 +412,7 @@ mod tests {
             MyStruct s;
         };
         void main() {}
-        ", ShaderKind::Vertex, &[]).unwrap();
+        ", ShaderKind::Vertex, &[], &[]).unwrap();
         let doc = parse::parse_spirv(comp.as_binary()).unwrap();
         structs::write_structs(&doc);
     }
@@ -428,8 +432,155 @@ mod tests {
             MyStruct s;
         };
         void main() {}
-        ", ShaderKind::Vertex, &[]).unwrap();
+        ", ShaderKind::Vertex, &[], &[]).unwrap();
         let doc = parse::parse_spirv(comp.as_binary()).unwrap();
         structs::write_structs(&doc);
     }
+    #[test]
+    fn test_def_0() {
+        // This should fail as the MyStruct def is not available
+        let comp = compile(None, "
+        #version 450
+        struct Vec3Wrap {
+            vec3 v;
+        };
+        #if TEST_DEF
+        struct MyStruct {
+            Vec3Wrap vs[2];
+        };
+        #endif
+        layout(binding=0) uniform UBO {
+            MyStruct s;
+        };
+        void main() {}
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "0")]);
+        assert!(comp.is_err());
+    }
+    #[test]
+    fn test_def_1() {
+        // This should pass as the MyStruct def is available
+        let comp = compile(None, "
+        #version 450
+        struct Vec3Wrap {
+            vec3 v;
+        };
+        #ifdef TEST_DEF
+        struct MyStruct {
+            Vec3Wrap vs[2];
+        };
+        #endif
+        layout(binding=0) uniform UBO {
+            MyStruct s;
+        };
+        void main() {}
+
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "1")]);
+        assert!(comp.is_ok());
+    }
+
+    #[test]
+    fn test_def_eq_0() {
+        // Test that the output of the compilation is the same
+        // as comp1 should have the differing statement removed.
+        let comp0 = compile(None, "
+        #version 450
+        void main() {
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        }
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "0")])
+            .expect("Test failed to compile");
+
+        let comp1 = compile(None, "
+        #version 450
+        void main() {
+        #if TEST_DEF
+            gl_Position = vec4(3.0, 2.0, 1.0, 0.0);
+        #else
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        #endif
+        }
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "0")])
+            .expect("Test failed to compile");
+        assert_eq!(comp0.as_binary(), comp1.as_binary());
+    }
+
+    #[test]
+    fn test_def_eq_1() {
+        // Test that the output of the compilation is the same
+        // as comp1 should have the differing statement removed.
+        let comp0 = compile(None, "
+        #version 450
+        void main() {
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        }
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "1")])
+            .expect("Test failed to compile");
+
+        let comp1 = compile(None, "
+        #version 450
+        void main() {
+        #if TEST_DEF
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        #else
+            gl_Position = vec4(3.0, 2.0, 1.0, 0.0);
+        #endif
+        }
+        ", ShaderKind::Vertex, &[], &[("TEST_DEF", "1")])
+            .expect("Test failed to compile");
+        assert_eq!(comp0.as_binary(), comp1.as_binary());
+    }
+
+
+    #[test]
+    fn test_def_eq_undefined() {
+        // Test that the output of the compilation is the same
+        // as comp1 should have the differing statement removed.
+        // If TEST_DEF is not given at all as a compilation option,
+        // it should be undefined
+        let comp0 = compile(None, "
+        #version 450
+        void main() {
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        }
+        ", ShaderKind::Vertex, &[], &[])
+            .expect("Test failed to compile");
+
+        let comp1 = compile(None, "
+        #version 450
+        void main() {
+        #if TEST_DEF
+            gl_Position = vec4(3.0, 2.0, 1.0, 0.0);
+        #else
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        #endif
+        }
+        ", ShaderKind::Vertex, &[], &[])
+            .expect("Test failed to compile");
+        assert_eq!(comp0.as_binary(), comp1.as_binary());
+    }
+
+    #[test]
+    fn test_def_vecty_str() {
+        // Test that the inserted value can be any string
+        // gl_Position is a vec4 so if the string is not
+        // properly substituted, compilation will fail.
+        let comp0 = compile(None, "
+        #version 450
+        void main() {
+            gl_Position = vec4(1.0, 2.0, 3.0, 4.0);
+        }
+        ", ShaderKind::Vertex, &[], &[])
+            .expect("Test failed to compile");
+
+        let comp1 = compile(None, "
+        #version 450
+        void main() {
+            gl_Position = TEST_VEC_TY(1.0, 2.0, 3.0, 4.0);
+        }
+        ", ShaderKind::Vertex, &[], &[("TEST_VEC_TY", "vec4")])
+            .expect("Test failed to compile");
+        assert_eq!(comp0.as_binary(), comp1.as_binary());
+    }
+
+
 }

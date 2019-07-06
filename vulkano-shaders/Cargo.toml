@@ -16,7 +16,7 @@ proc-macro = true
 
 [dependencies]
 shaderc = "0.5"
-syn = "0.15"
+syn = { version = "0.15", features = ["full"] }
 quote = "0.6"
 proc-macro2 = "0.4"
 

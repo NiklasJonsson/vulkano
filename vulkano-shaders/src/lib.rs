@@ -162,7 +162,7 @@ use std::io::{Read, Result as IoResult};
 use std::path::Path;
 
 use syn::parse::{Parse, ParseStream, Result};
-use syn::{Ident, LitStr, LitBool};
+use syn::{Ident, LitStr, LitBool, Expr, ExprArray, Lit, ExprLit};
 
 mod codegen;
 mod descriptor_sets;
@@ -185,6 +185,7 @@ struct MacroInput {
     source_kind: SourceKind,
     include_directories: Vec<String>,
     dump: bool,
+    macro_defines: Vec<(String, String)>,
 }
 
 impl Parse for MacroInput {
@@ -193,6 +194,7 @@ impl Parse for MacroInput {
         let mut shader_kind = None;
         let mut source_kind = None;
         let mut include_directories = Vec::new();
+        let mut macro_defines = Vec::new();
 
         while !input.is_empty() {
             let name: Ident = input.parse()?;
@@ -253,6 +255,35 @@ impl Parse for MacroInput {
                     let dump_lit: LitBool = input.parse()?;
                     dump = Some(dump_lit.value);
                 }
+                "define" => {
+                    input.parse::<Token![&]>()?;
+                    let expr = Expr::parse(input)?;
+                    let arr = match expr {
+                        Expr::Array(inner) => inner,
+                        _ => panic!("Can only except array for defines!")
+                    };
+
+                    for expr in arr.elems {
+                        let tuple = match expr {
+                            Expr::Tuple(inner_tuple) => inner_tuple,
+                            _ => panic!("Can only accept tuples as array members!"),
+                        };
+
+                        assert_eq!(tuple.elems.len(), 2, "Can only handle 2 elem tuples!");
+                        let elems = tuple.elems;
+                        let name = match &elems[0] {
+                            Expr::Lit(ExprLit{attrs: _, lit: Lit::Str(name)}) => name,
+                            _ => panic!("Needs literal string as first tuple member!")
+                        };
+                        let val = match &elems[1] {
+                            Expr::Lit(ExprLit{attrs: _, lit: Lit::Str(val)}) => val,
+                            _ => panic!("Needs literal string as 2nd tuple member!")
+                        };
+
+                        macro_defines.push((name.value(), val.value()));
+                    }
+                }
+
                 name => panic!(format!("Unknown field name: {}", name))
             }
 
@@ -273,7 +304,7 @@ impl Parse for MacroInput {
 
         let dump = dump.unwrap_or(false);
 
-        Ok(MacroInput { shader_kind, source_kind, include_directories, dump })
+        Ok(MacroInput { shader_kind, source_kind, include_directories, dump, macro_defines })
     }
 }
 
@@ -303,6 +334,38 @@ pub fn shader(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         })
     };
 
-    let content = codegen::compile(path, &source_code, input.shader_kind, &input.include_directories).unwrap();
+    let macro_defines = input.macro_defines
+        .iter()
+        .map(|(name, val)| (name.as_str(), val.as_str()))
+        .collect::<Vec<_>>();
+
+    let content = codegen::compile(path, &source_code, input.shader_kind, &input.include_directories, macro_defines.as_slice()).unwrap();
     codegen::reflect("Shader", content.as_binary(), input.dump).unwrap().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parsing_defines() {
+	let input = quote!{
+            ty: "vertex",
+            src: "
+                  #version 450
+
+                  layout(location = 0) in vec3 position;
+
+                  void main() {
+                    gl_Position = vec4(position, 1.0);
+                  }",
+            define: &[("TEST_DEF", "4"), ("TEST_DEF_2", "vec")],
+	};
+        // Using parse2 allows use to parse tokenstream without being in a
+        // proc_macro environment
+        let input: MacroInput = syn::parse2::<MacroInput>(input.into()).unwrap();
+        assert_eq!(input.macro_defines.len(), 2);
+        assert_eq!(input.macro_defines[0], ("TEST_DEF".to_owned(), "4".to_owned()));
+        assert_eq!(input.macro_defines[1], ("TEST_DEF_2".to_owned(), "vec".to_owned()));
+    }
 }
